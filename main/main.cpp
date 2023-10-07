@@ -557,48 +557,7 @@ void scanI2Cdevice(void) {
   /* else  Serial.println("done\n"); */
 }
 
-/* The AXP library computes this incorrectly for AXP192.
-   It's just a fixed mapping table from the datasheet */
-int axp_charge_to_ma(int set) {
-  switch (set) {
-    case 0:
-      return 100;
-    case 1:
-      return 190;
-    case 2:
-      return 280;
-    case 3:
-      return 360;
-    case 4:
-      return 450;
-    case 5:
-      return 550;
-    case 6:
-      return 630;
-    case 7:
-      return 700;
-    case 8:
-      return 780;
-    case 9:
-      return 880;
-    case 10:
-      return 960;
-    case 11:
-      return 1000;
-    case 12:
-      return 1080;
-    case 13:
-      return 1160;
-    case 14:
-      return 1240;
-    case 15:
-      return 1320;
-    default:
-      return -1;
-  }
-}
-
-void axp192Init() {
+void pmuInit() {
   if (!PMU) {
         PMU = new XPowersAXP2101(Wire);
         if (!PMU->init()) {
@@ -904,7 +863,7 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   scanI2Cdevice();
 
-  axp192Init();
+  pmuInit();
 
   // GPS sometimes gets wedged with no satellites in view and only a power-cycle
   // saves it. Here we turn off power and the delay in screen setup is enough
