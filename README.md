@@ -1,9 +1,12 @@
 <!-- ## TTGO T-Beam Tracker for The Things Network and/or The Helium Network  -->
-# TTGO T-Beam Mapper for the Helium LoRaWAN Network.
+# TTGO T-Beam 1.2 Mapper for the Helium LoRaWAN Network.
 by [Max-Plastix](https://github.com/Max-Plastix/tbeam-helium-mapper/)
 
 ### TL;DR
-This code loads onto LilyGo TTGO T-Beam v1.1 board to make a Helium Network Mapper.  To build one: download this build, configure some files, and upload it to your device.  Go travel the world to contribute to the Helium Network Coverage Maps!
+This code loads onto LilyGo TTGO T-Beam v1.2 board to make a Helium Network Mapper.  To build one: download this build, configure some files, and upload it to your device.  Go travel the world to contribute to the Helium Network Coverage Maps!
+
+This code is based off of the original T-Beam 1.1 codebase which does not work on the currently shipping hardware. This repo includes
+updates to support the AXP2101 PMU and has been tested with a device containing a uBlox NEO-6M GPS chipset.
 
 ## Purpose
 The goal of this software is to have a **TTGO T-Beam** Mapper that's ideally suited to walking or driving, taking cues from the USB Power source and movement for activity level.  
@@ -23,9 +26,9 @@ No, you do not.  I put this here because it seems to be the #1 FAQ.  You do not 
 No, you do not.  It's the #2 FAQ.  The Mapper data and coverage maps are not involved in any POC challenges or used for gaming denylists.
 
 ## Supported Hardware
-I tested this software on (many) LilyGo [TTGO T-Beam v1.1](http://www.lilygo.cn/prod_view.aspx?TypeId=50060&Id=1317&FId=t3:50060:3) devices, all on **US915**.  Others have enjoyed success on **EU688** and other worldwide bands, with the matching device.  These are commonly available as "Meshtastic" devices from AliExpress, Amazon, Banggood, eBay, etc, usually as a kit with an unsoldered OLED screen and SMA antenna for around USD $30.00.
+I tested this software on (many) LilyGo [TTGO T-Beam v1.2](https://www.lilygo.cc/products/t-beam-v1-1-esp32-lora-module) devices, all on **US915**.  
 
-If you have an older v0.7 board or different region, adjust the configuration to match.  If you have a unique variant and find something not working, open an Issue and provide what information you can.
+This is the current shipping version of this device and lilygo no longer manufacturers the older 1.1 version.  
 
 ### Semtech LoRa Radio
 This build uses the [MCCI Catena LMIC Library](https://github.com/mcci-catena/arduino-lmic) for LoRaWAN on the Semtech SX1276 or SX1272 radio modules.
