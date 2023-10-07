@@ -27,8 +27,8 @@ void gps_setup(boolean first_init) {
   if (serial_ready) {
     gpsSerial.updateBaudRate(GPS_BAUDRATE);
   } else {
-    gpsSerial.begin(GPS_BAUDRATE, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     gpsSerial.setRxBufferSize(2048);  // Default is 256
+    gpsSerial.begin(GPS_BAUDRATE, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     serial_ready = true;
   }
   // Drain any waiting garbage

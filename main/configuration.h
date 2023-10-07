@@ -27,8 +27,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // -----------------------------------------------------------------------------
 // Version
 // -----------------------------------------------------------------------------
-#define APP_NAME "MaxP Mapper"
-#define APP_VERSION "1.7.8"  // 2022-Nov-18
+#define APP_NAME "T-Beam 1.2 Helium Mapper"
+#define APP_VERSION "1.8"  // 2023-Oct-5
 
 // -----------------------------------------------------------------------------
 // CONFIGURATION
@@ -226,3 +226,4 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define GPS_POWER_CTRL_CH 3
 #define LORA_POWER_CTRL_CH 2
 #define PMU_IRQ 35
+

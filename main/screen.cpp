@@ -125,7 +125,7 @@ enum display_types display_get_type(uint8_t id) {
   };
   Wire.write(a, sizeof(a));
   if ((err = Wire.endTransmission(false)) != 0) {
-    Serial.printf("err=%d EndTransmission=%d(%s)", err, Wire.lastError(), Wire.getErrorText(Wire.lastError()));
+    Serial.printf("err=%d EndTransmission=%d", err, Wire.getWriteError());
     return DISPLAY_UNKNOWN;
   }
 
@@ -133,7 +133,7 @@ enum display_types display_get_type(uint8_t id) {
   uint8_t b[] = {0x40, 'M', 'P'};  // co=0 DC=1 & 000000, then two bytes of data
   Wire.write(b, sizeof(b));
   if ((err = Wire.endTransmission(false)) != 0) {
-    Serial.printf("err=%d EndTransmission=%d(%s)", err, Wire.lastError(), Wire.getErrorText(Wire.lastError()));
+    Serial.printf("err=%d EndTransmission=%d", err, Wire.getWriteError());
     return DISPLAY_UNKNOWN;
   }
 
@@ -141,14 +141,14 @@ enum display_types display_get_type(uint8_t id) {
   uint8_t c[] = {0, 0, 0x10}; // Back to Lower & Higher Column address 0
   Wire.write(c, sizeof(c));
   if ((err = Wire.endTransmission(false)) != 0) {
-    Serial.printf("err=%d EndTransmission=%d(%s)", err, Wire.lastError(), Wire.getErrorText(Wire.lastError()));
+    Serial.printf("err=%d EndTransmission=%d", err, Wire.getWriteError());
     return DISPLAY_UNKNOWN;
   }
 
   Wire.beginTransmission(id);
   Wire.write(0x40); // Data next
   if ((err = Wire.endTransmission(false)) != 0) {
-    Serial.printf("err=%d EndTransmission=%d(%s)", err, Wire.lastError(), Wire.getErrorText(Wire.lastError()));
+    Serial.printf("err=%d EndTransmission=%d", err, Wire.getWriteError());
     return DISPLAY_UNKNOWN;
   }
   err = Wire.requestFrom((int)id, (int)3, (int)1);
@@ -162,10 +162,10 @@ enum display_types display_get_type(uint8_t id) {
 
   // If we read back what we wrote, memory is readable:
   if (b1 == 'M' && b2 == 'P')
-    return DISPLAY_SH1106;
-  else
-    return DISPLAY_SSD1306;
-}
+      return DISPLAY_SH1106;
+    else
+      return DISPLAY_SSD1306;
+  }
 
 void screen_setup(uint8_t addr) {
   /* Attempt to determine which kind of display we're dealing with */
@@ -194,9 +194,8 @@ void screen_end() {
     delete display;
   }
 }
-
-#include <axp20x.h>
-extern AXP20X_Class axp;  // TODO: This is evil
+#include "XPowersLib.h"
+extern XPowersLibInterface *PMU;
 
 void screen_header(unsigned int tx_interval_s, float min_dist_moved, char *cached_sf_name, boolean in_deadzone,
                    boolean stay_on, boolean never_rest) {
@@ -213,8 +212,9 @@ void screen_header(unsigned int tx_interval_s, float min_dist_moved, char *cache
   // Cycle display every 3 seconds
   if (millis() % 6000 < 3000) {
     // Voltage and Current
-    snprintf(buffer, sizeof(buffer), "%.2fV  %.0fmA", axp.getBattVoltage() / 1000,
-             axp.getBattChargeCurrent() - axp.getBattDischargeCurrent());
+
+    snprintf(buffer, sizeof(buffer), "%.2fV  %i%", (double)PMU->getBattVoltage() / 1000,
+             PMU->getBatteryPercent());
 
     // display->setTextAlignment(TEXT_ALIGN_CENTER);
     // display->drawString(display->getWidth() / 2, 2, buffer);
