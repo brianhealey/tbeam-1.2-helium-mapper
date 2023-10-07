@@ -1,6 +1,7 @@
 <!-- ## TTGO T-Beam Tracker for The Things Network and/or The Helium Network  -->
 # TTGO T-Beam 1.2 Mapper for the Helium LoRaWAN Network.
-by [Max-Plastix](https://github.com/Max-Plastix/tbeam-helium-mapper/)
+Forked from a build be by [Max-Plastix](https://github.com/Max-Plastix/tbeam-helium-mapper/)
+Current version maintained by [brianhealey](https://github.com/brianhealey/tbeam-1.2-helium-mapper/)
 
 ### TL;DR
 This code loads onto LilyGo TTGO T-Beam v1.2 board to make a Helium Network Mapper.  To build one: download this build, configure some files, and upload it to your device.  Go travel the world to contribute to the Helium Network Coverage Maps!
