@@ -36,7 +36,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Wire.h>
-#include <axp20x.h>
+#include "XPowersLib.h"
 #include <lmic.h>
 
 #include "configuration.h"
@@ -103,11 +103,11 @@ uint32_t last_fix_time = 0;
 float battery_low_voltage = BATTERY_LOW_VOLTAGE;
 float min_dist_moved = MIN_DIST;
 
-AXP20X_Class axp;
+XPowersLibInterface *PMU = NULL;
 bool pmu_irq = false;  // true when PMU IRQ pending
 
 bool oled_found = false;
-bool axp192_found = false;
+bool pmu_found = false;
 uint8_t oled_addr = 0;  // i2c address of OLED controller
 
 bool packetQueued;
@@ -153,7 +153,7 @@ void pack_lat_lon(double lat, double lon) {
 }
 
 uint8_t battery_byte(void) {
-  uint16_t batteryVoltage = ((float_t)((float_t)(axp.getBattVoltage()) / 10.0) + .5);
+  uint16_t batteryVoltage = ((float_t)((float_t)(PMU->getBattVoltage()) / 10.0) + .5);
   return (uint8_t)((batteryVoltage - 200) & 0xFF);
 }
 
@@ -391,10 +391,6 @@ void mapper_save_prefs(void) {
 }
 
 void mapper_erase_prefs(void) {
-#if 0 
-  nvs_flash_erase(); // erase the NVS partition and...
-  nvs_flash_init(); // initialize the NVS partition.
-#endif
   Preferences p;
   if (p.begin("mapper", false)) {
     p.clear();
@@ -455,7 +451,7 @@ void lora_msg_callback(uint8_t message) {
   }
 
   if (EV_TXSTART == message) {
-    screen_print("+\v");
+    screen_print("+");
     screen_update();
   }
   // We only want to say 'packetSent' for our packets (not packets needed for
@@ -463,8 +459,8 @@ void lora_msg_callback(uint8_t message) {
   if (EV_TXCOMPLETE == message && packetQueued) {
     //    screen_print("sent.\n");
     packetQueued = false;
-    if (axp192_found)
-      axp.setChgLEDMode(AXP20X_LED_OFF);
+    if (pmu_found)
+      PMU->setChargingLedMode(XPOWERS_CHG_LED_OFF);
   }
 
   if (EV_ACK == message) {
@@ -549,10 +545,6 @@ void scanI2Cdevice(void) {
         oled_found = true;
         Serial.printf("OLED at %02X\n", oled_addr);
       }
-      if (addr == AXP192_SLAVE_ADDRESS) {
-        axp192_found = true;
-        Serial.println("AXP192 PMU");
-      }
     } else if (err == 4) {
       Serial.print("Unknown i2c device at 0x");
       if (addr < 16)
@@ -565,156 +557,283 @@ void scanI2Cdevice(void) {
   /* else  Serial.println("done\n"); */
 }
 
-/* The AXP library computes this incorrectly for AXP192.
-   It's just a fixed mapping table from the datasheet */
-int axp_charge_to_ma(int set) {
-  switch (set) {
-    case 0:
-      return 100;
-    case 1:
-      return 190;
-    case 2:
-      return 280;
-    case 3:
-      return 360;
-    case 4:
-      return 450;
-    case 5:
-      return 550;
-    case 6:
-      return 630;
-    case 7:
-      return 700;
-    case 8:
-      return 780;
-    case 9:
-      return 880;
-    case 10:
-      return 960;
-    case 11:
-      return 1000;
-    case 12:
-      return 1080;
-    case 13:
-      return 1160;
-    case 14:
-      return 1240;
-    case 15:
-      return 1320;
-    default:
-      return -1;
-  }
-}
-
-/**
-  Initialize the AXP192 power manager chip.
-
-  DCDC1 0.7-3.5V @ 1200mA max -> OLED
-  If you turn the OLED off, it will drag down the I2C lines and block the bus from the AXP192 which shares it.
-  Use SSD1306 sleep mode instead
-
-  DCDC3 0.7-3.5V @ 700mA max -> ESP32 (keep this on!)
-  LDO1 30mA -> "VCC_RTC" charges GPS tiny J13 backup battery
-  LDO2 200mA -> "LORA_VCC"
-  LDO3 200mA -> "GPS_VCC"
-*/
-void axp192Init() {
-  if (axp192_found) {
-    if (!axp.begin(Wire, AXP192_SLAVE_ADDRESS)) {
-      // Serial.println("AXP192 Begin PASS");
-    } else {
-      Serial.println("axp.begin() FAIL");
-      axp192_found = false;
-      return;
+void pmuInit() {
+  if (!PMU) {
+        PMU = new XPowersAXP2101(Wire);
+        if (!PMU->init()) {
+            Serial.println("Warning: Failed to find AXP2101 power management");
+            delete PMU;
+            PMU = NULL;
+        } else {
+            Serial.println("AXP2101 PMU init succeeded, using AXP2101 PMU");
+            pmu_found = true;
+        }
     }
 
-    axp.setPowerOutPut(AXP192_LDO2, AXP202_ON);        // LORA radio 200mA "LORA_VCC"
-    axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);        // GPS power 200mA "GPS_VCC"
-    axp.setLDO3Voltage(3300);                          // Voltage for GPS Power.  (Neo-6 can take 2.7v to 3.6v)
-    axp.setPowerOutPut(AXP192_DCDC1, AXP202_ON);       // OLED power, 1200mA max "VCC_2.5V"
-    axp.setDCDC1Voltage(2500);                         // Voltage or the OLED SSD1306
-    axp.setPowerOutPut(AXP192_DCDC2, AXP202_OFF);      // Unconnected
-    axp.setPowerOutPut(AXP192_EXTEN, AXP202_OFF);      // "EXTEN" pin, unused
-    axp.setChargeControlCur(AXP1XX_CHARGE_CUR_550MA);  // Default 0x1000 = 780mA, more than we can get from USB
+    if (!PMU) {
+        PMU = new XPowersAXP192(Wire);
+        if (!PMU->init()) {
+            Serial.println("Warning: Failed to find AXP192 power management");
+            delete PMU;
+            PMU = NULL;
+        } else {
+            Serial.println("AXP192 PMU init succeeded, using AXP192 PMU");
+            pmu_found = true;
+        }
+    }
 
-    // Flash the Blue LED until our first packet is transmitted
-    axp.setChgLEDMode(AXP20X_LED_BLINK_4HZ);
-    // axp.setChgLEDMode(AXP20X_LED_OFF);
+    if (!PMU) {
+        return;
+    }
 
-#if 0
-    Serial.printf("DCDC1: %s\n", axp.isDCDC1Enable() ? "ENABLE" : "DISABLE");
-    Serial.printf("DCDC2: %s\n", axp.isDCDC2Enable() ? "ENABLE" : "DISABLE");
-    Serial.printf("DCDC3: %s\n", axp.isDCDC3Enable() ? "ENABLE" : "DISABLE");
-    //Serial.printf("LDO1: %s\n", axp.isLDO1Enable() ? "ENABLE" : "DISABLE");
-    Serial.printf("LDO2: %s\n", axp.isLDO2Enable() ? "ENABLE" : "DISABLE");
-    Serial.printf("LDO3: %s\n", axp.isLDO3Enable() ? "ENABLE" : "DISABLE");
-    Serial.printf("Exten: %s\n", axp.isExtenEnable() ? "ENABLE" : "DISABLE");
+    PMU->setChargingLedMode(XPOWERS_CHG_LED_BLINK_1HZ);
+
+    if (PMU->getChipModel() == XPOWERS_AXP192) {
+
+        PMU->setProtectedChannel(XPOWERS_DCDC3);
+
+        // lora
+        PMU->setPowerChannelVoltage(XPOWERS_LDO2, 3300);
+        // gps
+        PMU->setPowerChannelVoltage(XPOWERS_LDO3, 3300);
+        // oled
+        PMU->setPowerChannelVoltage(XPOWERS_DCDC1, 3300);
+
+        PMU->enablePowerOutput(XPOWERS_LDO2);
+        PMU->enablePowerOutput(XPOWERS_LDO3);
+
+        //protected oled power source
+        PMU->setProtectedChannel(XPOWERS_DCDC1);
+        //protected esp32 power source
+        PMU->setProtectedChannel(XPOWERS_DCDC3);
+        // enable oled power
+        PMU->enablePowerOutput(XPOWERS_DCDC1);
+
+        //disable not use channel
+        PMU->disablePowerOutput(XPOWERS_DCDC2);
+
+        PMU->disableIRQ(XPOWERS_AXP192_ALL_IRQ);
+
+        PMU->enableIRQ(XPOWERS_AXP192_VBUS_REMOVE_IRQ |
+                       XPOWERS_AXP192_VBUS_INSERT_IRQ |
+                       XPOWERS_AXP192_BAT_CHG_DONE_IRQ |
+                       XPOWERS_AXP192_BAT_CHG_START_IRQ |
+                       XPOWERS_AXP192_BAT_REMOVE_IRQ |
+                       XPOWERS_AXP192_BAT_INSERT_IRQ |
+                       XPOWERS_AXP192_PKEY_SHORT_IRQ
+                      );
+
+    } else if (PMU->getChipModel() == XPOWERS_AXP2101) {
+
+// #if defined(CONFIG_IDF_TARGET_ESP32)
+        //Unuse power channel
+        PMU->disablePowerOutput(XPOWERS_DCDC2);
+        PMU->disablePowerOutput(XPOWERS_DCDC3);
+        PMU->disablePowerOutput(XPOWERS_DCDC4);
+        PMU->disablePowerOutput(XPOWERS_DCDC5);
+        PMU->disablePowerOutput(XPOWERS_ALDO1);
+        PMU->disablePowerOutput(XPOWERS_ALDO4);
+        PMU->disablePowerOutput(XPOWERS_BLDO1);
+        PMU->disablePowerOutput(XPOWERS_BLDO2);
+        PMU->disablePowerOutput(XPOWERS_DLDO1);
+        PMU->disablePowerOutput(XPOWERS_DLDO2);
+
+        // GNSS RTC PowerVDD 3300mV
+        PMU->setPowerChannelVoltage(XPOWERS_VBACKUP, 3300);
+        PMU->enablePowerOutput(XPOWERS_VBACKUP);
+
+        // ESP32 VDD 3300mV
+        //  ! No need to set, automatically open , Don't close it
+        //  PMU->setPowerChannelVoltage(XPOWERS_DCDC1, 3300);
+        //  PMU->setProtectedChannel(XPOWERS_DCDC1);
+
+        // LoRa VDD 3300mV
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO2, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO2);
+
+        // GNSS VDD 3300mV
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO3, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO3);
+        PMU->disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+        // Clear all interrupt flags
+        PMU->clearIrqStatus();
+        // Enable the required interrupt function
+        PMU->enableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+
+// #endif /*CONFIG_IDF_TARGET_ESP32*/
+
+
+#if defined(LILYGO_TBeamS3_SUPREME_V3_0)
+
+        //t-beam m.2 inface
+        //gps
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO4, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO4);
+
+        // lora
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO3, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO3);
+
+        // In order to avoid bus occupation, during initialization, the SD card and QMC sensor are powered off and restarted
+        if (ESP_SLEEP_WAKEUP_UNDEFINED == esp_sleep_get_wakeup_cause()) {
+            Serial.println("Power off and restart ALDO BLDO..");
+            PMU->disablePowerOutput(XPOWERS_ALDO1);
+            PMU->disablePowerOutput(XPOWERS_ALDO2);
+            PMU->disablePowerOutput(XPOWERS_BLDO1);
+            delay(250);
+        }
+
+        // Sensor
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO1, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO1);
+
+        PMU->setPowerChannelVoltage(XPOWERS_ALDO2, 3300);
+        PMU->enablePowerOutput(XPOWERS_ALDO2);
+
+        //Sdcard
+
+        PMU->setPowerChannelVoltage(XPOWERS_BLDO1, 3300);
+        PMU->enablePowerOutput(XPOWERS_BLDO1);
+
+        PMU->setPowerChannelVoltage(XPOWERS_BLDO2, 3300);
+        PMU->enablePowerOutput(XPOWERS_BLDO2);
+
+        //face m.2
+        PMU->setPowerChannelVoltage(XPOWERS_DCDC3, 3300);
+        PMU->enablePowerOutput(XPOWERS_DCDC3);
+
+        PMU->setPowerChannelVoltage(XPOWERS_DCDC4, XPOWERS_AXP2101_DCDC4_VOL2_MAX);
+        PMU->enablePowerOutput(XPOWERS_DCDC4);
+
+        PMU->setPowerChannelVoltage(XPOWERS_DCDC5, 3300);
+        PMU->enablePowerOutput(XPOWERS_DCDC5);
+
+
+        //not use channel
+        PMU->disablePowerOutput(XPOWERS_DCDC2);
+        // PMU->disablePowerOutput(XPOWERS_DCDC4);
+        // PMU->disablePowerOutput(XPOWERS_DCDC5);
+        PMU->disablePowerOutput(XPOWERS_DLDO1);
+        PMU->disablePowerOutput(XPOWERS_DLDO2);
+        PMU->disablePowerOutput(XPOWERS_VBACKUP);
+
+        // Set constant current charge current limit
+        PMU->setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_500MA);
+
+        // Set charge cut-off voltage
+        PMU->setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);
+
+        // Disable all interrupts
+        PMU->disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
+        // Clear all interrupt flags
+        PMU->clearIrqStatus();
+        // Enable the required interrupt function
+        PMU->enableIRQ(
+            XPOWERS_AXP2101_BAT_INSERT_IRQ    | XPOWERS_AXP2101_BAT_REMOVE_IRQ      |   //BATTERY
+            XPOWERS_AXP2101_VBUS_INSERT_IRQ   | XPOWERS_AXP2101_VBUS_REMOVE_IRQ     |   //VBUS
+            XPOWERS_AXP2101_PKEY_SHORT_IRQ    | XPOWERS_AXP2101_PKEY_LONG_IRQ       |   //POWER KEY
+            XPOWERS_AXP2101_BAT_CHG_DONE_IRQ  | XPOWERS_AXP2101_BAT_CHG_START_IRQ       //CHARGE
+            // XPOWERS_AXP2101_PKEY_NEGATIVE_IRQ | XPOWERS_AXP2101_PKEY_POSITIVE_IRQ   |   //POWER KEY
+        );
+
 #endif
-    // Fire an interrupt on falling edge.  Note that some IRQs repeat/persist.
+    }
+
+    PMU->setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_500MA);
+
+    // Set up the charging voltage
+    PMU->setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);
+
+    PMU->clearIrqStatus();
+
+
+    uint64_t pmuIrqMask = 0;
+
+    if (PMU->getChipModel() == XPOWERS_AXP192) {
+        pmuIrqMask = XPOWERS_AXP192_VBUS_INSERT_IRQ | XPOWERS_AXP192_BAT_INSERT_IRQ | XPOWERS_AXP192_PKEY_SHORT_IRQ;
+    } else if (PMU->getChipModel() == XPOWERS_AXP2101) {
+        pmuIrqMask = XPOWERS_AXP2101_VBUS_INSERT_IRQ | XPOWERS_AXP2101_BAT_INSERT_IRQ | XPOWERS_AXP2101_PKEY_SHORT_IRQ;
+    }
+
     pinMode(PMU_IRQ, INPUT);
-    gpio_pullup_en((gpio_num_t)PMU_IRQ);
-    attachInterrupt(
-        PMU_IRQ, [] { pmu_irq = true; }, FALLING);
+    attachInterrupt(PMU_IRQ, [] { pmu_irq = true; }, FALLING);
 
-    // Configure REG 36H: PEK press key parameter set.  Index values for
-    // argument!
-    axp.setStartupTime(2);        // "Power on time": 512mS
-    axp.setlongPressTime(2);      // "Long time key press time": 2S
-    axp.setShutdownTime(2);       // "Power off time" = 8S
-    axp.setTimeOutShutdown(1);    // "When key press time is longer than power off time, auto power off"
-    axp.setVWarningLevel1(2950);  // These warning IRQs do not clear until charged, and inhibit other IRQs!
-    axp.setVWarningLevel2(2900);  // We effectively disable them by setting them lower than we'd run
+    // we do not look for AXPXXX_CHARGING_FINISHED_IRQ & AXPXXX_CHARGING_IRQ because it occurs repeatedly while there is
+    // no battery also it could cause inadvertent waking from light sleep just because the battery filled
+    // we don't look for AXPXXX_BATT_REMOVED_IRQ because it occurs repeatedly while no battery installed
+    // we don't look at AXPXXX_VBUS_REMOVED_IRQ because we don't have anything hooked to vbus
+    PMU->enableIRQ(pmuIrqMask);
 
-    // Serial.printf("AC IN: %fv\n", axp.getAcinVoltage());
-    // Serial.printf("Vbus: %fv\n", axp.getVbusVoltage());
-    Serial.printf("PMIC Temp %0.2f°C\n", axp.getTemp());
-    // Serial.printf("TSTemp %f°C\n", axp.getTSTemp());
-    // Serial.printf("GPIO0 %fv\n", axp.getGPIO0Voltage());
-    // Serial.printf("GPIO1 %fv\n", axp.getGPIO1Voltage());
-    // Serial.printf("Batt In: %fmW\n", axp.getBattInpower());
-    Serial.printf("Battery: %0.3fv\n", axp.getBattVoltage() / 1000.0);
-    Serial.printf("SysIPSOut: %0.3fv\n", axp.getSysIPSOUTVoltage() / 1000.0);
-    Serial.printf("isVBUSPlug? %s\n", axp.isVBUSPlug() ? "Yes" : "No");
-    have_usb_power = axp.isVBUSPlug();
-    Serial.printf("isChargingEnable? %s\n", axp.isChargeingEnable() ? "Yes" : "No");
-    // Doesn't work on AXP192 because it has a different charge current curve:
-    // Serial.printf("ChargeCurrent: %.2fmA\n", axp.getSettingChargeCurrent());
-    Serial.printf("ChargeControlCurrent: %d = %dmA\n", axp.getChargeControlCur(),
-                  axp_charge_to_ma(axp.getChargeControlCur()));
-    Serial.printf("Battery Charge Level: %d%%\n", axp.getBattPercentage());
+    PMU->clearIrqStatus();
 
-    Serial.printf("WarningLevel1: %d mV\n", axp.getVWarningLevel1());
-    Serial.printf("WarningLevel2: %d mV\n", axp.getVWarningLevel2());
-    Serial.printf("PowerDown:     %d mV\n", axp.getPowerDownVoltage());
+    PMU->enableSystemVoltageMeasure();
+    PMU->enableVbusVoltageMeasure();
+    PMU->enableBattVoltageMeasure();
+    // It is necessary to disable the detection function of the TS pin on the board
+    // without the battery temperature detection function, otherwise it will cause abnormal charging
+    PMU->disableTSPinMeasure();
 
-    Serial.printf("DCDC1Voltage: %d mV\n", axp.getDCDC1Voltage());
-    Serial.printf("DCDC2Voltage: %d mV\n", axp.getDCDC2Voltage());
-    Serial.printf("DCDC3Voltage: %d mV\n", axp.getDCDC3Voltage());
-    Serial.printf("LDO2:         %d mV\n", axp.getLDO2Voltage());
-    Serial.printf("LDO3:         %d mV\n", axp.getLDO3Voltage());
-    Serial.printf("LDO4:         %d mV\n", axp.getLDO4Voltage());
+    Serial.printf("=========================================\n");
+    if (PMU->isChannelAvailable(XPOWERS_DCDC1)) {
+        Serial.printf("DC1  : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_DCDC1)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_DCDC1));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_DCDC2)) {
+        Serial.printf("DC2  : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_DCDC2)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_DCDC2));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_DCDC3)) {
+        Serial.printf("DC3  : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_DCDC3)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_DCDC3));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_DCDC4)) {
+        Serial.printf("DC4  : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_DCDC4)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_DCDC4));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_DCDC5)) {
+        Serial.printf("DC5  : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_DCDC5)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_DCDC5));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_LDO2)) {
+        Serial.printf("LDO2 : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_LDO2)   ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_LDO2));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_LDO3)) {
+        Serial.printf("LDO3 : %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_LDO3)   ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_LDO3));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_ALDO1)) {
+        Serial.printf("ALDO1: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_ALDO1)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_ALDO1));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_ALDO2)) {
+        Serial.printf("ALDO2: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_ALDO2)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_ALDO2));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_ALDO3)) {
+        Serial.printf("ALDO3: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_ALDO3)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_ALDO3));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_ALDO4)) {
+        Serial.printf("ALDO4: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_ALDO4)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_ALDO4));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_BLDO1)) {
+        Serial.printf("BLDO1: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_BLDO1)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_BLDO1));
+    }
+    if (PMU->isChannelAvailable(XPOWERS_BLDO2)) {
+        Serial.printf("BLDO2: %s   Voltage: %04u mV \n",  PMU->isPowerChannelEnable(XPOWERS_BLDO2)  ? "+" : "-",  PMU->getPowerChannelVoltage(XPOWERS_BLDO2));
+    }
+    Serial.printf("=========================================\n");
 
-    // Enable battery current measurements
-    axp.adc1Enable(AXP202_BATT_CUR_ADC1, 1);
-    //    axp.enableIRQ(AXP202_VBUS_REMOVED_IRQ | AXP202_VBUS_CONNECT_IRQ |
-    //    AXP202_BATT_REMOVED_IRQ | AXP202_BATT_CONNECT_IRQ, 1);
-    axp.enableIRQ(0xFFFFFFFFFF, 1);  // Give me ALL the interrupts you have.
 
-    // @Kenny_PDY discovered that low-battery voltage inhibits detecting the menu button.
-    // Disable these two IRQs until we figure out why it blocks the PEK button IRQs.
-    // Low battery also seems to inhibit the USB present/lost signal we use to wake up.
-    axp.enableIRQ(APX202_APS_LOW_VOL_LEVEL1_IRQ, 0);
-    axp.enableIRQ(AXP202_APS_LOW_VOL_LEVEL2_IRQ, 0);
+    // Set the time of pressing the button to turn off
+    PMU->setPowerKeyPressOffTime(XPOWERS_POWEROFF_4S);
+    uint8_t opt = PMU->getPowerKeyPressOffTime();
+    Serial.print("PowerKeyPressOffTime:");
+    switch (opt) {
+    case XPOWERS_POWEROFF_4S: Serial.println("4 Second");
+        break;
+    case XPOWERS_POWEROFF_6S: Serial.println("6 Second");
+        break;
+    case XPOWERS_POWEROFF_8S: Serial.println("8 Second");
+        break;
+    case XPOWERS_POWEROFF_10S: Serial.println("10 Second");
+        break;
+    default:
+        break;
+    }
 
-    // The Charging Current available is less than requested for battery charging.
-    // Another Persistent IRQ.  Clear it after showing it once?
-    // TODO: Show it every X minutes?  Adjust charge current request?
-    axp.enableIRQ(AXP202_CHARGE_LOW_CUR_IRQ, 0);
-
-    axp.clearIRQ();
-  } else {
-    Serial.println("AXP192 not found!");
-  }
+    return;
 }
 
 // Perform power on init that we do on each wake from deep sleep
@@ -744,12 +863,13 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   scanI2Cdevice();
 
-  axp192Init();
+  pmuInit();
 
   // GPS sometimes gets wedged with no satellites in view and only a power-cycle
   // saves it. Here we turn off power and the delay in screen setup is enough
   // time to bonk the GPS
-  axp.setPowerOutPut(AXP192_LDO3, AXP202_OFF);  // GPS power off
+  PMU->disablePowerOutput(XPOWERS_ALDO3);
+  //axp.setPowerOutPut(AXP192_LDO3, AXP202_OFF);  // GPS power off
 
   // Buttons & LED
   pinMode(MIDDLE_BUTTON_PIN, INPUT);
@@ -773,7 +893,8 @@ void setup() {
   is_screen_on = true;
 
   // GPS power on, so it has time to settle.
-  axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);
+  PMU->enablePowerOutput(XPOWERS_ALDO3);
+  //axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);
 
   // Show logo on first boot (as opposed to wake)
   if (bootCount <= 1) {
@@ -800,8 +921,8 @@ void setup() {
   gps_setup(true);  // Init GPS baudrate and messages
 
   // This is bad.. we can't find the AXP192 PMIC, so no menu key detect:
-  if (!axp192_found)
-    screen_print("** Missing AXP192! **\n");
+  if (!pmu_found)
+    screen_print("** Missing pmu! **\n");
 
   Serial.printf("Deadzone: %f.0m @ %f, %f\n", deadzone_radius_m, deadzone_lat, deadzone_lon);
 }
@@ -817,14 +938,17 @@ void low_power_sleep(uint32_t seconds) {
 
   digitalWrite(RED_LED, HIGH);  // LED Off
 
-  if (axp192_found) {
-    axp.setPowerOutPut(AXP192_LDO3, AXP202_OFF);  // GPS power
-    axp.setChgLEDMode(AXP20X_LED_OFF);            // Blue LED off
+  if (pmu_found) {
+    PMU->disablePowerOutput(XPOWERS_ALDO3);
+    PMU->setChargingLedMode(XPOWERS_CHG_LED_OFF);
+    PMU->disablePowerOutput(XPOWERS_DCDC1);
+    //axp.setPowerOutPut(AXP192_LDO3, AXP202_OFF);  // GPS power
+    //axp.setChgLEDMode(AXP20X_LED_OFF);            // Blue LED off
 
     // Turning off DCDC1 consumes MORE power, for reasons unknown
     // axp.setPowerOutPut(AXP192_DCDC1, AXP202_OFF);  // OLED power off
-    // pinMode(I2C_SCL, OUTPUT);
-    // digitalWrite(I2C_SCL, HIGH);                    // Must enable pull-up on SCL to keep AXP accessible
+    pinMode(I2C_SCL, OUTPUT);
+    digitalWrite(I2C_SCL, HIGH);                    // Must enable pull-up on SCL to keep AXP accessible
   }
 
   // Wake on either button press
@@ -834,7 +958,7 @@ void low_power_sleep(uint32_t seconds) {
 
   esp_sleep_enable_timer_wakeup(seconds * 1000ULL * 1000ULL);  // call expects usecs
   // Some GPIOs need this to stay on?
-  // esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
 
   esp_light_sleep_start();
   // If we woke by keypress (7) then turn on the screen
@@ -849,11 +973,13 @@ void low_power_sleep(uint32_t seconds) {
   if (was_screen_on)
     screen_on();
 
-  if (axp192_found) {
-    axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);  // GPS power
+  if (pmu_found) {
+    PMU->enablePowerOutput(XPOWERS_ALDO3);
+    PMU->enablePowerOutput(XPOWERS_DCDC1);
+    //axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);  // GPS power
     // axp.setPowerOutPut(AXP192_DCDC1, AXP202_ON);  // OLED power
-    // if (oled_found)
-    //  screen_setup();
+    if (oled_found)
+     screen_setup(oled_addr);
   }
 
   delay(100);        // GPS doesn't respond right away.. not ready for baud-rate test.
@@ -865,10 +991,12 @@ void clean_shutdown(void) {
   LMIC_shutdown();  // cleanly shutdown the radio
   mapper_save_prefs();
   ttn_write_prefs();
-  if (axp192_found) {
-    axp.setChgLEDMode(AXP20X_LED_OFF);  // Surprisingly sticky if you don't set it
+  if (pmu_found) {
+    PMU->setChargingLedMode(XPOWERS_CHG_LED_OFF);
+    PMU->shutdown();
+    // axp.setChgLEDMode(AXP20X_LED_OFF);  // Surprisingly sticky if you don't set it
 
-    axp.shutdown();  // PMIC power off
+    // axp.shutdown();  // PMIC power off
   } else {
     while (1)
       ;  // ?? What to do here.  burn power?
@@ -907,10 +1035,10 @@ void update_activity() {
   }
 
   uint32_t now = millis();
-  float bat_volts = axp.getBattVoltage() / 1000;
-  float charge_ma = axp.getBattChargeCurrent();
+  float bat_volts = PMU->getBattVoltage() / 1000;
+  float charge_ma = PMU->getChargerConstantCurr();
 
-  if (axp192_found && axp.isBatteryConnect() && bat_volts < battery_low_voltage && charge_ma < 99.0) {
+  if (pmu_found && PMU->isBatteryConnect() && bat_volts < battery_low_voltage && charge_ma < 99.0) {
     Serial.println("Low Battery OFF");
     screen_print("\nLow Battery OFF\n");
     delay(4999);  // Give some time to read the screen
@@ -953,7 +1081,7 @@ void update_activity() {
 
   {
     boolean had_usb_power = have_usb_power;
-    have_usb_power = (axp192_found && axp.isVBUSPlug());
+    have_usb_power = (pmu_found && PMU->isVbusIn());
 
     if (have_usb_power && !had_usb_power) {
       usb_power_count++;
@@ -1007,80 +1135,22 @@ void update_activity() {
 const char *find_irq_name(void) {
   const char *irq_name = "MysteryIRQ";
 
-  if (axp.isAcinOverVoltageIRQ())
-    irq_name = "AcinOverVoltage";
-  else if (axp.isAcinPlugInIRQ())
-    irq_name = "AcinPlugIn";
-  else if (axp.isAcinRemoveIRQ())
-    irq_name = "AcinRemove";
-  else if (axp.isVbusOverVoltageIRQ())
-    irq_name = "VbusOverVoltage";
-  else if (axp.isVbusPlugInIRQ())
-    irq_name = "USB Connected";  // "VbusPlugIn";
-  else if (axp.isVbusRemoveIRQ())
-    irq_name = "USB Removed";  // "VbusRemove";
-  else if (axp.isVbusLowVHOLDIRQ())
-    irq_name = "VbusLowVHOLD";
-  else if (axp.isBattPlugInIRQ())
-    irq_name = "BattPlugIn";
-  else if (axp.isBattRemoveIRQ())
-    irq_name = "BattRemove";
-  else if (axp.isBattEnterActivateIRQ())
-    irq_name = "BattEnterActivate";
-  else if (axp.isBattExitActivateIRQ())
-    irq_name = "BattExitActivate";
-  else if (axp.isChargingIRQ())
-    irq_name = "Charging";
-  else if (axp.isChargingDoneIRQ())
-    irq_name = "ChargingDone";
-  else if (axp.isBattTempLowIRQ())
-    irq_name = "BattTempLow";
-  else if (axp.isBattTempHighIRQ())
-    irq_name = "BattTempHigh";
-  else if (axp.isChipOvertemperatureIRQ())
-    irq_name = "ChipOvertemperature";
-  else if (axp.isChargingCurrentLessIRQ()) {
-    irq_name = "ChargingCurrentLess";
-  } else if (axp.isDC2VoltageLessIRQ())
-    irq_name = "DC2VoltageLess";
-  else if (axp.isDC3VoltageLessIRQ())
-    irq_name = "DC3VoltageLess";
-  else if (axp.isLDO3VoltageLessIRQ())
-    irq_name = "LDO3VoltageLess";
-  else if (axp.isPEKShortPressIRQ())
-    irq_name = "PEKShortPress";
-  else if (axp.isPEKLongtPressIRQ())
-    irq_name = "PEKLongtPress";
-  else if (axp.isNOEPowerOnIRQ())
-    irq_name = "NOEPowerOn";
-  else if (axp.isNOEPowerDownIRQ())
-    irq_name = "NOEPowerDown";
-  else if (axp.isVBUSEffectiveIRQ())
-    irq_name = "VBUSEffective";
-  else if (axp.isVBUSInvalidIRQ())
-    irq_name = "VBUSInvalid";
-  else if (axp.isVUBSSessionIRQ())
-    irq_name = "VUBSSession";
-  else if (axp.isVUBSSessionEndIRQ())
-    irq_name = "VUBSSessionEnd";
-  else if (axp.isLowVoltageLevel1IRQ())
-    irq_name = "LowVoltageLevel1";
-  else if (axp.isLowVoltageLevel2IRQ())
-    irq_name = "LowVoltageLevel2";
-  else if (axp.isTimerTimeoutIRQ())
-    irq_name = "TimerTimeout";
-  else if (axp.isPEKRisingEdgeIRQ())
-    irq_name = "PEKRisingEdge";
-  else if (axp.isPEKFallingEdgeIRQ())
-    irq_name = "PEKFallingEdge";
-  else if (axp.isGPIO3InputEdgeTriggerIRQ())
-    irq_name = "GPIO3InputEdgeTrigger";
-  else if (axp.isGPIO2InputEdgeTriggerIRQ())
-    irq_name = "GPIO2InputEdgeTrigger";
-  else if (axp.isGPIO1InputEdgeTriggerIRQ())
-    irq_name = "GPIO1InputEdgeTrigger";
-  else if (axp.isGPIO0InputEdgeTriggerIRQ())
-    irq_name = "GPIO0InputEdgeTrigger";
+  if (PMU->isBatChagerStartIrq())
+    irq_name = "Begin Battery Charge";
+  else if (PMU->isBatChagerDoneIrq())
+    irq_name = "Battery Fully Charged";
+  else if (PMU->isBatInsertIrq())
+    irq_name = "Battery Inserted";
+  else if (PMU->isBatRemoveIrq())
+    irq_name = "Battery Removed";
+  else if (PMU->isPekeyLongPressIrq())
+    irq_name = "Power Key Long Press";  // "VbusPlugIn";
+  else if (PMU->isPekeyShortPressIrq())
+    irq_name = "Power Key Short Press";  // "VbusRemove";
+  else if (PMU->isVbusInsertIrq())
+    irq_name = "USB Plugged In";
+  else if (PMU->isVbusRemoveIrq())
+    irq_name = "USB Unplugged";
 
   return irq_name;
 }
@@ -1122,8 +1192,10 @@ void menu_time_minus(void) {
     stationary_tx_interval_s = 10;
 }
 void menu_gps_passthrough(void) {
-  axp.setChgLEDMode(AXP20X_LED_BLINK_1HZ);
-  axp.setPowerOutPut(AXP192_LDO2, AXP202_OFF);  // Kill LORA radio
+  PMU->setChargingLedMode(XPOWERS_CHG_LED_CTRL_CHG);
+  PMU->disablePowerOutput(XPOWERS_ALDO2);
+  //axp.setChgLEDMode(AXP20X_LED_BLINK_1HZ);
+  //axp.setPowerOutPut(AXP192_LDO2, AXP202_OFF);  // Kill LORA radio
   gps_passthrough();
   // Does not return.
 }
@@ -1139,7 +1211,8 @@ void menu_experiment(void) {
   snprintf(buffer, sizeof(buffer), "\nGPS %dmv", gps_mv);
   screen_print(buffer);
 
-  axp.setLDO3Voltage(gps_mv);                          // Voltage for GPS Power.  (Neo-6 can take 2.7v to 3.6v) 
+  PMU->setPowerChannelVoltage(XPOWERS_ALDO3, gps_mv);
+  //axp.setLDO3Voltage(gps_mv);                          // Voltage for GPS Power.  (Neo-6 can take 2.7v to 3.6v) 
 }
 
 void menu_deadzone_here(void) {
@@ -1222,7 +1295,9 @@ void loop() {
 
   gps_loop(0 /* active_state == ACTIVITY_WOKE */);  // Update GPS
   now_fix_count = tGPS.sentencesWithFix();          // Did we get a new fix?
-  if (now_fix_count != last_fix_count) {
+
+  if (now_fix_count != last_fix_count) 
+  {
     last_fix_count = now_fix_count;
     last_fix_time = now;  // Note the time of most recent fix
   }
@@ -1237,22 +1312,24 @@ void loop() {
 
   // If any interrupts on PMIC, report the name
   // PEK button handler
-  if (axp192_found && pmu_irq) {
-    const char *irq_name;
+  if (pmu_found && pmu_irq) {
+    const char *irq_name = "";
     pmu_irq = false;
-    axp.readIRQ();
+    PMU->getIrqStatus();
     irq_name = find_irq_name();
 
-    if (axp.isPEKShortPressIRQ())
+    if (PMU->isPekeyShortPressIrq())
       menu_press();
-    else if (axp.isPEKLongtPressIRQ())  // want to turn OFF
+    else if (PMU->isPekeyLongPressIrq())  // want to turn OFF
       menu_power_off();
-    else {
-      snprintf(buffer, sizeof(buffer), "\n* %s  ", irq_name);
-      screen_print(buffer);
-    }
-    axp.clearIRQ();
+    // else 
+    // {
+    //   snprintf(buffer, sizeof(buffer), "\n* %s  ", irq_name);
+    //   screen_print(buffer);
+    // }
+    
     screen_last_active_ms = now;
+    PMU->clearIrqStatus();
   }
 
   // Middle Button handler
@@ -1304,8 +1381,9 @@ void loop() {
 
   if (mapper_uplink() == MAPPER_UPLINK_SUCCESS) {
     // Good send, light Blue LED
-    if (axp192_found)
-      axp.setChgLEDMode(AXP20X_LED_LOW_LEVEL);
+    if (pmu_found)
+      PMU->setChargingLedMode(XPOWERS_CHG_LED_BLINK_1HZ);
+      //axp.setChgLEDMode(AXP20X_LED_LOW_LEVEL);
   } else {
     // Nothing sent.
     // Do NOT delay() here.. the LoRa receiver and join housekeeping also needs to run!
